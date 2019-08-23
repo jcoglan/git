@@ -30,6 +30,10 @@ void free_delta_index(struct delta_index *index);
  */
 unsigned long sizeof_delta_index(struct delta_index *index);
 
+struct delta;
+struct delta *init_delta();
+void free_delta(struct delta *delta);
+
 /*
  * create_delta: create a delta from given index for the given buffer
  *
@@ -43,7 +47,8 @@ unsigned long sizeof_delta_index(struct delta_index *index);
 void *
 create_delta(const struct delta_index *index,
 	     const void *buf, unsigned long bufsize,
-	     unsigned long *delta_size, unsigned long max_delta_size);
+	     unsigned long *delta_size, unsigned long max_delta_size,
+	     struct delta *delta);
 
 /*
  * diff_delta: create a delta from source buffer to target buffer
@@ -60,10 +65,12 @@ diff_delta(const void *src_buf, unsigned long src_bufsize,
 {
 	struct delta_index *index = create_delta_index(src_buf, src_bufsize);
 	if (index) {
-		void *delta = create_delta(index, trg_buf, trg_bufsize,
-					   delta_size, max_delta_size);
+		struct delta *delta = init_delta();
+		void *buf = create_delta(index, trg_buf, trg_bufsize,
+					 delta_size, max_delta_size, delta);
+		free_delta(delta);
 		free_delta_index(index);
-		return delta;
+		return buf;
 	}
 	return NULL;
 }

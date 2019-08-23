@@ -308,6 +308,178 @@ unsigned long sizeof_delta_index(struct delta_index *index)
 		return 0;
 }
 
+enum delta_op_type {
+	DELTA_OP_COPY,
+	DELTA_OP_INSERT
+};
+
+struct delta_op {
+	enum delta_op_type type;
+	off_t offset;
+	size_t size;
+};
+
+struct delta {
+	size_t length;
+	size_t src_size;
+	size_t trg_size;
+	size_t ops_len;
+	size_t ops_cap;
+	struct delta_op *ops;
+};
+
+#define INIT_DELTA_OPS 1024
+
+size_t delta_sizeof_size_header(size_t n)
+{
+	size_t i = 0;
+	while ((1 << (7 * i)) - 1 < n)
+		i++;
+	return i;
+}
+
+void reset_delta(struct delta *delta, size_t src_size, size_t trg_size)
+{
+	delta->length = delta_sizeof_size_header(src_size) +
+			delta_sizeof_size_header(trg_size);
+
+	delta->src_size = src_size;
+	delta->trg_size = trg_size;
+	delta->ops_len = 0;
+}
+
+struct delta *init_delta()
+{
+	struct delta_op *ops;
+	struct delta *delta;
+
+	ops = calloc(INIT_DELTA_OPS, sizeof(struct delta_op));
+	if (ops == NULL)
+		return NULL;
+
+	delta = calloc(1, sizeof(struct delta));
+	if (delta == NULL)
+		return NULL;
+
+	delta->ops_cap = INIT_DELTA_OPS;
+	delta->ops = ops;
+
+	reset_delta(delta, 0, 0);
+
+	return delta;
+}
+
+void free_delta(struct delta *delta)
+{
+	free(delta->ops);
+	free(delta);
+}
+
+size_t delta_sizeof_op(struct delta_op *op)
+{
+	off_t offset = op->offset;
+	size_t size = op->size;
+	size_t i = 0;
+
+	switch (op->type) {
+		case DELTA_OP_COPY:
+			if (offset & 0x000000ff) i++;
+			if (offset & 0x0000ff00) i++;
+			if (offset & 0x00ff0000) i++;
+			if (offset & 0xff000000) i++;
+			if (size & 0x00ff) i++;
+			if (size & 0xff00) i++;
+			break;
+		case DELTA_OP_INSERT:
+			i = size;
+			break;
+	}
+
+	return i + 1;
+}
+
+void push_delta_op(struct delta *delta, enum delta_op_type type, off_t offset, size_t size)
+{
+	struct delta_op *op;
+
+	if (delta->ops_len == delta->ops_cap) {
+		delta->ops_cap *= 2;
+		delta->ops = realloc(delta->ops, delta->ops_cap * sizeof(struct delta_op));
+	}
+
+	op = &delta->ops[delta->ops_len++];
+	op->type = type;
+	op->offset = offset;
+	op->size = size;
+
+	delta->length += delta_sizeof_op(op);
+}
+
+void push_insert_op(struct delta *delta,
+		    const void *trg_buf, const unsigned char *data,
+		    int inscnt)
+{
+	size_t offset = data - inscnt - (unsigned char *)trg_buf;
+	push_delta_op(delta, DELTA_OP_INSERT, offset, inscnt);
+}
+
+void serialize_delta_size(size_t size, unsigned char *buf, size_t *pos)
+{
+	size_t p = *pos;
+	while (size >= 0x80) {
+		buf[p++] = size | 0x80;
+		size >>= 7;
+	}
+	buf[p++] = size;
+	*pos = p;
+}
+
+unsigned char *serialize_delta(struct delta *delta, const unsigned char *trg_buf, size_t *length)
+{
+	unsigned char *buf = calloc(delta->length, sizeof(char));
+	size_t pos = 0;
+	int i;
+
+	serialize_delta_size(delta->src_size, buf, &pos);
+	serialize_delta_size(delta->trg_size, buf, &pos);
+
+	for (i = 0; i < delta->ops_len; i++) {
+		struct delta_op *op = &delta->ops[i];
+		size_t offset = op->offset, size = op->size, op_pos = pos++;
+		unsigned char mask = 0x80;
+
+		switch (op->type) {
+			case DELTA_OP_COPY:
+				if (offset & 0x000000ff)
+					buf[pos++] = offset >> 0,  mask |= 0x01;
+				if (offset & 0x0000ff00)
+					buf[pos++] = offset >> 8,  mask |= 0x02;
+				if (offset & 0x00ff0000)
+					buf[pos++] = offset >> 16, mask |= 0x04;
+				if (offset & 0xff000000)
+					buf[pos++] = offset >> 24, mask |= 0x08;
+
+				if (size & 0x00ff)
+					buf[pos++] = size >> 0, mask |= 0x10;
+				if (size & 0xff00)
+					buf[pos++] = size >> 8, mask |= 0x20;
+
+				buf[op_pos] = mask;
+				break;
+
+			case DELTA_OP_INSERT:
+				buf[op_pos] = size;
+				memcpy(buf + pos, trg_buf + offset, size);
+				pos += size;
+				break;
+		}
+	}
+
+	assert(pos == delta->length);
+	*length = delta->length;
+	return buf;
+}
+
 /*
  * The maximum size for any opcode sequence, including the initial header
  * plus Rabin window plus biggest copy.
@@ -317,7 +489,8 @@ unsigned long sizeof_delta_index(struct delta_index *index)
 void *
 create_delta(const struct delta_index *index,
 	     const void *trg_buf, unsigned long trg_size,
-	     unsigned long *delta_size, unsigned long max_size)
+	     unsigned long *delta_size, unsigned long max_size,
+	     struct delta *delta)
 {
 	unsigned int i, val;
 	off_t outpos, moff;
@@ -336,6 +509,8 @@ create_delta(const struct delta_index *index,
 	out = malloc(outsize);
 	if (!out)
 		return NULL;
+
+	reset_delta(delta, index->src_size, trg_size);
 
 	/* store reference buffer size */
 	l = index->src_size;
@@ -403,6 +578,7 @@ create_delta(const struct delta_index *index,
 			inscnt++;
 			if (inscnt == 0x7f) {
 				out[outpos - inscnt - 1] = inscnt;
+				push_insert_op(delta, trg_buf, data, inscnt);
 				inscnt = 0;
 			}
 			msize = 0;
@@ -424,6 +600,8 @@ create_delta(const struct delta_index *index,
 					break;
 				}
 				out[outpos - inscnt - 1] = inscnt;
+				if (inscnt > 0)
+					push_insert_op(delta, trg_buf, data, inscnt);
 				inscnt = 0;
 			}
 
@@ -433,6 +611,8 @@ create_delta(const struct delta_index *index,
 
 			op = out + outpos++;
 			i = 0x80;
+
+			push_delta_op(delta, DELTA_OP_COPY, moff, msize);
 
 			if (moff & 0x000000ff)
 				out[outpos++] = moff >> 0,  i |= 0x01;
@@ -481,13 +661,21 @@ create_delta(const struct delta_index *index,
 		}
 	}
 
-	if (inscnt)
+	if (inscnt) {
+		push_insert_op(delta, trg_buf, data, inscnt);
 		out[outpos - inscnt - 1] = inscnt;
+	}
 
 	if (max_size && outpos > max_size) {
 		free(out);
 		return NULL;
 	}
+
+	size_t buflen = 0;
+	unsigned char *buf = serialize_delta(delta, trg_buf, &buflen);
+	assert(buflen == outpos);
+	assert(!memcmp(buf, out, buflen));
+	free(buf);
 
 	*delta_size = outpos;
 	return out;

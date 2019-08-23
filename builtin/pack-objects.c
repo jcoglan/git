@@ -2026,7 +2026,8 @@ unsigned long oe_get_size_slow(struct packing_data *pack,
 }
 
 static int try_delta(struct unpacked *trg, struct unpacked *src,
-		     unsigned max_depth, unsigned long *mem_usage)
+		     unsigned max_depth, unsigned long *mem_usage,
+		     struct delta *delta)
 {
 	struct object_entry *trg_entry = trg->entry;
 	struct object_entry *src_entry = src->entry;
@@ -2133,7 +2134,8 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 		*mem_usage += sizeof_delta_index(src->index);
 	}
 
-	delta_buf = create_delta(src->index, trg->data, trg_size, &delta_size, max_size);
+	delta_buf = create_delta(src->index, trg->data, trg_size, &delta_size, max_size, delta);
+
 	if (!delta_buf)
 		return 0;
 
@@ -2205,9 +2207,11 @@ static void find_deltas(struct object_entry **list, unsigned *list_size,
 {
 	uint32_t i, idx = 0, count = 0;
 	struct unpacked *array;
+	struct delta *delta;
 	unsigned long mem_usage = 0;
 
 	array = xcalloc(window, sizeof(struct unpacked));
+	delta = init_delta();
 
 	for (;;) {
 		struct object_entry *entry;
@@ -2266,7 +2270,7 @@ static void find_deltas(struct object_entry **list, unsigned *list_size,
 			m = array + other_idx;
 			if (!m->entry)
 				break;
-			ret = try_delta(n, m, max_depth, &mem_usage);
+			ret = try_delta(n, m, max_depth, &mem_usage, delta);
 			if (ret < 0)
 				break;
 			else if (ret > 0)
@@ -2339,6 +2343,7 @@ static void find_deltas(struct object_entry **list, unsigned *list_size,
 		free_delta_index(array[i].index);
 		free(array[i].data);
 	}
+	free_delta(delta);
 	free(array);
 }
 
