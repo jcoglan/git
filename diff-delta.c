@@ -510,6 +510,9 @@ create_delta(const struct delta_index *index,
 	moff = 0;
 	msize = 0;
 	while (data < top) {
+		if (max_size && delta->length > max_size)
+			return NULL;
+
 		if (msize < 4096) {
 			struct index_entry *entry;
 			val ^= U[data[-RABIN_WINDOW]];
