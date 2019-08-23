@@ -480,12 +480,6 @@ unsigned char *serialize_delta(struct delta *delta, const unsigned char *trg_buf
 	return buf;
 }
 
-/*
- * The maximum size for any opcode sequence, including the initial header
- * plus Rabin window plus biggest copy.
- */
-#define MAX_OP_SIZE	(5 + 5 + 1 + RABIN_WINDOW + 7)
-
 void *
 create_delta(const struct delta_index *index,
 	     const void *trg_buf, unsigned long trg_size,
@@ -493,52 +487,24 @@ create_delta(const struct delta_index *index,
 	     struct delta *delta)
 {
 	unsigned int i, val;
-	off_t outpos, moff;
-	size_t l, outsize, msize;
+	off_t moff;
+	size_t msize;
 	int inscnt;
 	const unsigned char *ref_data, *ref_top, *data, *top;
-	unsigned char *out;
 
 	if (!trg_buf || !trg_size)
 		return NULL;
 
-	outpos = 0;
-	outsize = 8192;
-	if (max_size && outsize >= max_size)
-		outsize = max_size + MAX_OP_SIZE + 1;
-	out = malloc(outsize);
-	if (!out)
-		return NULL;
-
 	reset_delta(delta, index->src_size, trg_size);
-
-	/* store reference buffer size */
-	l = index->src_size;
-	while (l >= 0x80) {
-		out[outpos++] = l | 0x80;
-		l >>= 7;
-	}
-	out[outpos++] = l;
-
-	/* store target buffer size */
-	l = trg_size;
-	while (l >= 0x80) {
-		out[outpos++] = l | 0x80;
-		l >>= 7;
-	}
-	out[outpos++] = l;
 
 	ref_data = index->src_buf;
 	ref_top = ref_data + index->src_size;
 	data = trg_buf;
 	top = (const unsigned char *) trg_buf + trg_size;
 
-	outpos++;
 	val = 0;
-	for (i = 0; i < RABIN_WINDOW && data < top; i++, data++) {
-		out[outpos++] = *data;
+	for (i = 0; i < RABIN_WINDOW && data < top; i++, data++)
 		val = ((val << 8) | *data) ^ T[val >> RABIN_SHIFT];
-	}
 	inscnt = i;
 
 	moff = 0;
@@ -572,19 +538,15 @@ create_delta(const struct delta_index *index,
 		}
 
 		if (msize < 4) {
-			if (!inscnt)
-				outpos++;
-			out[outpos++] = *data++;
+			data++;
 			inscnt++;
 			if (inscnt == 0x7f) {
-				out[outpos - inscnt - 1] = inscnt;
 				push_insert_op(delta, trg_buf, data, inscnt);
 				inscnt = 0;
 			}
 			msize = 0;
 		} else {
 			unsigned int left;
-			unsigned char *op;
 
 			if (inscnt) {
 				while (moff && ref_data[moff-1] == data[-1]) {
@@ -592,14 +554,11 @@ create_delta(const struct delta_index *index,
 					msize++;
 					moff--;
 					data--;
-					outpos--;
 					if (--inscnt)
 						continue;
-					outpos--;  /* remove count slot */
 					inscnt--;  /* make it -1 */
 					break;
 				}
-				out[outpos - inscnt - 1] = inscnt;
 				if (inscnt > 0)
 					push_insert_op(delta, trg_buf, data, inscnt);
 				inscnt = 0;
@@ -609,26 +568,7 @@ create_delta(const struct delta_index *index,
 			left = (msize < 0x10000) ? 0 : (msize - 0x10000);
 			msize -= left;
 
-			op = out + outpos++;
-			i = 0x80;
-
 			push_delta_op(delta, DELTA_OP_COPY, moff, msize);
-
-			if (moff & 0x000000ff)
-				out[outpos++] = moff >> 0,  i |= 0x01;
-			if (moff & 0x0000ff00)
-				out[outpos++] = moff >> 8,  i |= 0x02;
-			if (moff & 0x00ff0000)
-				out[outpos++] = moff >> 16, i |= 0x04;
-			if (moff & 0xff000000)
-				out[outpos++] = moff >> 24, i |= 0x08;
-
-			if (msize & 0x00ff)
-				out[outpos++] = msize >> 0, i |= 0x10;
-			if (msize & 0xff00)
-				out[outpos++] = msize >> 8, i |= 0x20;
-
-			*op = i;
 
 			data += msize;
 			moff += msize;
@@ -645,38 +585,13 @@ create_delta(const struct delta_index *index,
 					      ^ T[val >> RABIN_SHIFT];
 			}
 		}
-
-		if (outpos >= outsize - MAX_OP_SIZE) {
-			void *tmp = out;
-			outsize = outsize * 3 / 2;
-			if (max_size && outsize >= max_size)
-				outsize = max_size + MAX_OP_SIZE + 1;
-			if (max_size && outpos > max_size)
-				break;
-			out = realloc(out, outsize);
-			if (!out) {
-				free(tmp);
-				return NULL;
-			}
-		}
 	}
 
-	if (inscnt) {
+	if (inscnt)
 		push_insert_op(delta, trg_buf, data, inscnt);
-		out[outpos - inscnt - 1] = inscnt;
-	}
 
-	if (max_size && outpos > max_size) {
-		free(out);
+	if (max_size && delta->length > max_size)
 		return NULL;
-	}
-
-	size_t buflen = 0;
-	unsigned char *buf = serialize_delta(delta, trg_buf, &buflen);
-	assert(buflen == outpos);
-	assert(!memcmp(buf, out, buflen));
-	free(buf);
-
-	*delta_size = outpos;
-	return out;
+	else
+		return serialize_delta(delta, trg_buf, delta_size);
 }
