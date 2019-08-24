@@ -8,6 +8,7 @@
  * published by the Free Software Foundation.
  */
 
+#include <time.h>
 #include "cache.h"
 #include "gettext.h"
 #include "progress.h"
@@ -213,6 +214,8 @@ void display_progress(struct progress *progress, uint64_t n)
 		display(progress, n, NULL);
 }
 
+static time_t start_time;
+
 static struct progress *start_progress_delay(const char *title, uint64_t total,
 					     unsigned delay, unsigned sparse)
 {
@@ -229,6 +232,7 @@ static struct progress *start_progress_delay(const char *title, uint64_t total,
 	progress->title_len = utf8_strwidth(title);
 	progress->split = 0;
 	set_progress_signal();
+	start_time = time(NULL);
 	return progress;
 }
 
@@ -275,6 +279,9 @@ void stop_progress(struct progress **p_progress)
 	finish_if_sparse(*p_progress);
 
 	stop_progress_msg(p_progress, _("done"));
+
+	time_t end_time = time(NULL);
+	fprintf(stderr, "[timing] %ld\n", end_time - start_time);
 }
 
 void stop_progress_msg(struct progress **p_progress, const char *msg)
