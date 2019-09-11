@@ -1949,9 +1949,10 @@ struct unpacked {
 	unsigned depth;
 };
 
-static int delta_cacheable(unsigned long src_size, unsigned long trg_size,
-			   unsigned long delta_size)
+static int delta_cacheable(struct delta *delta)
 {
+	size_t delta_size = delta->length;
+
 	if (max_delta_cache_size && delta_cache_size + delta_size > max_delta_cache_size)
 		return 0;
 
@@ -1959,7 +1960,7 @@ static int delta_cacheable(unsigned long src_size, unsigned long trg_size,
 		return 1;
 
 	/* cache delta, if objects are large enough compared to delta size */
-	if ((src_size >> 20) + (trg_size >> 21) > (delta_size >> 10))
+	if ((delta->src_size >> 20) + (delta->trg_size >> 21) > (delta_size >> 10))
 		return 1;
 
 	return 0;
@@ -2034,7 +2035,6 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 	unsigned long trg_size, src_size, delta_size, sizediff, max_size, sz;
 	unsigned ref_depth;
 	enum object_type type;
-	void *delta_buf;
 
 	/* Don't bother doing diffs between different types */
 	if (oe_type(trg_entry) != oe_type(src_entry))
@@ -2134,38 +2134,16 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 		*mem_usage += sizeof_delta_index(src->index);
 	}
 
-	delta_buf = create_delta(src->index, trg->data, trg_size, &delta_size, max_size, delta);
-
-	if (!delta_buf)
+	if (!create_delta(src->index, trg->data, trg_size, max_size, delta))
 		return 0;
+
+	delta_size = delta->length;
 
 	if (DELTA(trg_entry)) {
 		/* Prefer only shallower same-sized deltas. */
 		if (delta_size == DELTA_SIZE(trg_entry) &&
-		    src->depth + 1 >= trg->depth) {
-			free(delta_buf);
+		    src->depth + 1 >= trg->depth)
 			return 0;
-		}
-	}
-
-	/*
-	 * Handle memory allocation outside of the cache
-	 * accounting lock.  Compiler will optimize the strangeness
-	 * away when NO_PTHREADS is defined.
-	 */
-	free(trg_entry->delta_data);
-	cache_lock();
-	if (trg_entry->delta_data) {
-		delta_cache_size -= DELTA_SIZE(trg_entry);
-		trg_entry->delta_data = NULL;
-	}
-	if (delta_cacheable(src_size, trg_size, delta_size)) {
-		delta_cache_size += delta_size;
-		cache_unlock();
-		trg_entry->delta_data = xrealloc(delta_buf, delta_size);
-	} else {
-		cache_unlock();
-		free(delta_buf);
 	}
 
 	SET_DELTA(trg_entry, src_entry);
@@ -2202,16 +2180,49 @@ static unsigned long free_unpacked(struct unpacked *n)
 	return freed_mem;
 }
 
+static void materialize_delta(struct unpacked *n)
+{
+	struct object_entry *entry = n->entry;
+	struct delta *delta = entry->delta;
+
+	if (!delta)
+		return;
+
+	unsigned char *delta_buf = serialize_delta(delta, n->data);
+
+	/*
+	 * Handle memory allocation outside of the cache
+	 * accounting lock.  Compiler will optimize the strangeness
+	 * away when NO_PTHREADS is defined.
+	 */
+	free(entry->delta_data);
+	cache_lock();
+	if (entry->delta_data) {
+		delta_cache_size -= delta->length;
+		entry->delta_data = NULL;
+	}
+	if (delta_cacheable(entry->delta)) {
+		delta_cache_size += delta->length;
+		cache_unlock();
+		entry->delta_data = delta_buf;
+	} else {
+		cache_unlock();
+		free(delta_buf);
+	}
+}
+
 static void find_deltas(struct object_entry **list, unsigned *list_size,
 			int window, int depth, unsigned *processed)
 {
 	uint32_t i, idx = 0, count = 0;
 	struct unpacked *array;
-	struct delta *delta;
+	struct delta *delta, *best_delta;
 	unsigned long mem_usage = 0;
 
 	array = xcalloc(window, sizeof(struct unpacked));
+
 	delta = init_delta();
+	best_delta = init_delta();
 
 	for (;;) {
 		struct object_entry *entry;
@@ -2271,11 +2282,17 @@ static void find_deltas(struct object_entry **list, unsigned *list_size,
 			if (!m->entry)
 				break;
 			ret = try_delta(n, m, max_depth, &mem_usage, delta);
-			if (ret < 0)
+			if (ret < 0) {
 				break;
-			else if (ret > 0)
+			} else if (ret > 0) {
 				best_base = other_idx;
+				entry->delta = delta;
+				delta = best_delta;
+				best_delta = entry->delta;
+			}
 		}
+
+		materialize_delta(n);
 
 		/*
 		 * If we decided to cache the delta data, then it is best
@@ -2343,6 +2360,7 @@ static void find_deltas(struct object_entry **list, unsigned *list_size,
 		free_delta_index(array[i].index);
 		free(array[i].data);
 	}
+	free_delta(best_delta);
 	free_delta(delta);
 	free(array);
 }

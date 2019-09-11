@@ -319,15 +319,6 @@ struct delta_op {
 	size_t size;
 };
 
-struct delta {
-	size_t length;
-	size_t src_size;
-	size_t trg_size;
-	size_t ops_len;
-	size_t ops_cap;
-	struct delta_op *ops;
-};
-
 #define INIT_DELTA_OPS 1024
 
 size_t delta_sizeof_size_header(size_t n)
@@ -434,7 +425,7 @@ void serialize_delta_size(size_t size, unsigned char *buf, size_t *pos)
 	*pos = p;
 }
 
-unsigned char *serialize_delta(struct delta *delta, const unsigned char *trg_buf, size_t *length)
+unsigned char *serialize_delta(struct delta *delta, const unsigned char *trg_buf)
 {
 	unsigned char *buf = calloc(delta->length, sizeof(char));
 	size_t pos = 0;
@@ -476,15 +467,13 @@ unsigned char *serialize_delta(struct delta *delta, const unsigned char *trg_buf
 	}
 
 	assert(pos == delta->length);
-	*length = delta->length;
 	return buf;
 }
 
-void *
+int
 create_delta(const struct delta_index *index,
 	     const void *trg_buf, unsigned long trg_size,
-	     unsigned long *delta_size, unsigned long max_size,
-	     struct delta *delta)
+	     unsigned long max_size, struct delta *delta)
 {
 	unsigned int i, val;
 	off_t moff;
@@ -493,7 +482,7 @@ create_delta(const struct delta_index *index,
 	const unsigned char *ref_data, *ref_top, *data, *top;
 
 	if (!trg_buf || !trg_size)
-		return NULL;
+		return 0;
 
 	reset_delta(delta, index->src_size, trg_size);
 
@@ -511,7 +500,7 @@ create_delta(const struct delta_index *index,
 	msize = 0;
 	while (data < top) {
 		if (max_size && delta->length > max_size)
-			return NULL;
+			return 0;
 
 		if (msize < 4096) {
 			struct index_entry *entry;
@@ -594,7 +583,7 @@ create_delta(const struct delta_index *index,
 		push_insert_op(delta, trg_buf, data, inscnt);
 
 	if (max_size && delta->length > max_size)
-		return NULL;
+		return 0;
 	else
-		return serialize_delta(delta, trg_buf, delta_size);
+		return 1;
 }

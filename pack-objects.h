@@ -4,6 +4,7 @@
 #include "object-store.h"
 #include "thread-utils.h"
 #include "pack.h"
+#include "delta.h"
 
 struct repository;
 
@@ -86,6 +87,7 @@ enum dfs_state {
  */
 struct object_entry {
 	struct pack_idx_entry idx;
+	struct delta *delta;
 	void *delta_data;	/* cached delta (uncompressed) */
 	off_t in_pack_offset;
 	uint32_t hash;			/* name hint hash */

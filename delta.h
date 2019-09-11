@@ -30,9 +30,20 @@ void free_delta_index(struct delta_index *index);
  */
 unsigned long sizeof_delta_index(struct delta_index *index);
 
-struct delta;
+struct delta_op;
+
+struct delta {
+	size_t length;
+	size_t src_size;
+	size_t trg_size;
+	size_t ops_len;
+	size_t ops_cap;
+	struct delta_op *ops;
+};
+
 struct delta *init_delta();
 void free_delta(struct delta *delta);
+unsigned char *serialize_delta(struct delta *delta, const unsigned char *trg_buf);
 
 /*
  * create_delta: create a delta from given index for the given buffer
@@ -44,11 +55,10 @@ void free_delta(struct delta *delta);
  * returned and *delta_size is updated with its size.  The returned buffer
  * must be freed by the caller.
  */
-void *
+int
 create_delta(const struct delta_index *index,
 	     const void *buf, unsigned long bufsize,
-	     unsigned long *delta_size, unsigned long max_delta_size,
-	     struct delta *delta);
+	     unsigned long max_delta_size, struct delta *delta);
 
 /*
  * diff_delta: create a delta from source buffer to target buffer
@@ -66,8 +76,9 @@ diff_delta(const void *src_buf, unsigned long src_bufsize,
 	struct delta_index *index = create_delta_index(src_buf, src_bufsize);
 	if (index) {
 		struct delta *delta = init_delta();
-		void *buf = create_delta(index, trg_buf, trg_bufsize,
-					 delta_size, max_delta_size, delta);
+		create_delta(index, trg_buf, trg_bufsize, max_delta_size, delta);
+		*delta_size = delta->length;
+		void *buf = serialize_delta(delta, trg_buf);
 		free_delta(delta);
 		free_delta_index(index);
 		return buf;
